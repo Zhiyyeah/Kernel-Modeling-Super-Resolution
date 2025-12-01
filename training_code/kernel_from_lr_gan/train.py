@@ -9,7 +9,7 @@ CURRENT_DIR = os.path.dirname(__file__)
 if CURRENT_DIR not in sys.path:
     sys.path.append(CURRENT_DIR)
 
-from networks import LinearGenerator, PatchDiscriminator
+from networks import MultiBandLinearGenerator, PatchDiscriminator
 from loss import lsgan_d_loss, lsgan_g_loss, kernel_regularization
 from data import load_nc_to_5band, sample_patches
 
@@ -39,14 +39,16 @@ def main():
     if not (nc_path and os.path.exists(nc_path)):
         print('错误：请在 train.py 中设置有效的 nc_path')
         return
+    
     img, valid_mask = load_nc_to_5band(nc_path)
     img = img.to(device)
     valid_mask = valid_mask.to(device)
     print(f'影像尺寸: {tuple(img.shape)}, 有效像素比例: {valid_mask.float().mean():.2%}')
 
-    # 模型（生成器输入 5 通道）
-    G = LinearGenerator(in_ch=5, mid_ch=64).to(device)
-    D = PatchDiscriminator(in_ch=1, base_ch=64, num_blocks=4).to(device)
+    # 模型（生成器输入 5 通道，输出 5 通道；判别器接受 5 通道）
+    G = MultiBandLinearGenerator(in_ch=5, mid_ch_ch=32) if False else MultiBandLinearGenerator(in_ch=5, mid_ch=32)
+    G = G.to(device)
+    D = PatchDiscriminator(in_ch=5, base_ch=64, num_blocks=4).to(device)
 
     opt_D = optim.Adam(D.parameters(), lr=lr_rate, betas=(0.5, 0.999))
     opt_G = optim.Adam(G.parameters(), lr=lr_rate, betas=(0.5, 0.999))
@@ -95,9 +97,11 @@ def main():
 
     def generator_weight_stats(G: torch.nn.Module) -> str:
         vals = []
-        for i, conv in enumerate(G.convs):
-            w = conv.weight.detach()
-            vals.append(f"L{i}(norm={w.norm().item():.3f},max={w.max().item():.3f})")
+        # 每个波段链的首层与末层权重统计
+        for b, chain in enumerate(G.chains):
+            w0 = chain[0].weight.detach()
+            w_last = chain[-1].weight.detach()
+            vals.append(f"B{b}(L0n={w0.norm().item():.3f},Ln={w_last.norm().item():.3f})")
         return ' '.join(vals)
 
     prev_k = None  # 用于计算核变化幅度
@@ -105,10 +109,9 @@ def main():
     for t in range(iters):
         # 采样补丁 [B,5,P,P]（避开无效区域）
         patches = sample_patches(img, patch_size=patch_size, batch_size=batch_size, valid_mask=valid_mask)
-        # 真实下采样（对 5 通道取均值后下采样为单通道）与生成器下采样（G输出就是下采样）
-        real_ds_5ch = torch.nn.functional.avg_pool2d(patches, kernel_size=2, stride=2)  # [B,5,P/2,P/2]
-        real_ds = real_ds_5ch.mean(dim=1, keepdim=True)  # [B,1,P/2,P/2] 跨波段平均为单通道
-        fake_ds = G(patches)  # [B,1,P/2,P/2]
+        # 真实下采样保持 5 通道；生成器输出亦为 5 通道
+        real_ds = torch.nn.functional.avg_pool2d(patches, kernel_size=2, stride=2)  # [B,5,P/2,P/2]
+        fake_ds = G(patches)  # [B,5,P/2,P/2]
 
         # 训练D
         D.train(); G.train()
@@ -120,8 +123,13 @@ def main():
         # 训练G（对抗 + 核正则）
         pred_fake = D(fake_ds)
         loss_G_adv = lsgan_g_loss(pred_fake)
-        k = G.extract_effective_kernel()
-        loss_reg = kernel_regularization(k, alpha=0.5, beta=0.5, gamma=5.0, delta=1.0)
+        ks_band = G.extract_effective_kernels()  # [C,kH,kW]
+        # 对每个波段核分别做正则再求平均
+        reg_list = []
+        for i in range(ks_band.shape[0]):
+            reg_list.append(kernel_regularization(ks_band[i], alpha=0.5, beta=0.5, gamma=5.0, delta=1.0))
+        loss_reg = torch.mean(torch.stack(reg_list))
+        k = ks_band.mean(dim=0)  # 用于后续单核统计（合并核）
         loss_G = loss_G_adv + loss_reg
         opt_G.zero_grad(); loss_G.backward(); opt_G.step()
 
@@ -141,17 +149,25 @@ def main():
                 delta = torch.norm(k - prev_k).item()
             prev_k = k.detach().clone()
             print(f"  [Kernel] shape={km['k_shape']} sum={km['k_sum']:.4f} max={km['k_max']:.4f} min={km['k_min']:.4f} std={km['k_std']:.4f} sparsity(>5%max)={km['sparsity']:.3f} center_offset={km['center_offset']:.3f} delta_L2={delta:.5f}")
+            # 多波段核
+            ks_all = G.extract_effective_kernels()  # [C,kH,kW]
+            k_merged = ks_all.mean(dim=0)
             if verbose:
-                print("  [Kernel ASCII]\n" + ascii_kernel(k))
+                print("  [Kernel ASCII merged]\n" + ascii_kernel(k_merged))
+                # 输出前几个波段的核最大值
+                band_max = ' '.join([f'b{i}_max={ks_all[i].max().item():.3f}' for i in range(min(ks_all.shape[0],3))])
+                print(f"  [Bands] {band_max}")
             if save_intermediate:
                 os.makedirs(outdir, exist_ok=True)
-                np.save(os.path.join(outdir, f'kernel_iter{t+1}.npy'), k.cpu().numpy())
+                np.save(os.path.join(outdir, f'kernel_iter{t+1}.npy'), k_merged.cpu().numpy())
 
     # 提取并保存最终核
-    k = G.extract_effective_kernel().cpu().numpy()
+    ks_final = G.extract_effective_kernels().cpu().numpy()
+    k_final_merged = ks_final.mean(axis=0)
     os.makedirs(outdir, exist_ok=True)
-    np.save(os.path.join(outdir, 'kernel.npy'), k)
-    print(f"Saved kernel to {os.path.join(outdir, 'kernel.npy')} | sum={k.sum():.6f}")
+    np.save(os.path.join(outdir, 'kernel_per_band.npy'), ks_final)
+    np.save(os.path.join(outdir, 'kernel_merged.npy'), k_final_merged)
+    print(f"Saved per-band kernels -> kernel_per_band.npy ({ks_final.shape}), merged -> kernel_merged.npy sum={k_final_merged.sum():.6f}")
 
 
 if __name__ == "__main__":
