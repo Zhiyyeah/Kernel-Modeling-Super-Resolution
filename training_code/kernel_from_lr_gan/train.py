@@ -50,11 +50,26 @@ def main():
     G = G.to(device)
     D = PatchDiscriminator(in_ch=5, base_ch=64, num_blocks=4).to(device)
 
-    opt_D = optim.Adam(D.parameters(), lr=lr_rate, betas=(0.5, 0.999))
-    opt_G = optim.Adam(G.parameters(), lr=lr_rate, betas=(0.5, 0.999))
+    opt_D = optim.Adam(params=D.parameters(), lr=lr_rate, betas=(0.5, 0.999))
+    opt_G = optim.Adam(params=G.parameters(), lr=lr_rate, betas=(0.5, 0.999))
 
     def kernel_metrics(k: torch.Tensor) -> dict:
-        """计算核的多项统计指标用于监控。k: [kH,kW] (sum≈1)。"""
+        """
+        计算模糊核的多项统计指标用于监控训练进度。
+
+        参数:
+            k (torch.Tensor): 模糊核，形状 [kH, kW]，应已归一化（sum≈1）。
+
+        返回:
+            dict: 包含以下键值对：
+                - k_shape (str): 核尺寸，如 '13x13'。
+                - k_sum (float): 核元素总和（应接近 1.0）。
+                - k_max (float): 核最大值。
+                - k_min (float): 核最小值。
+                - k_std (float): 核标准差。
+                - sparsity (float): 稀疏度，>5%最大值的元素占比。
+                - center_offset (float): 质心到几何中心的欧氏距离。
+        """
         kH, kW = k.shape
         # 稀疏度：非零或>阈值元素占比
         thresh = k.max() * 0.05
@@ -78,10 +93,20 @@ def main():
         }
 
     def ascii_kernel(k: torch.Tensor, size: int = 11) -> str:
-        """将核缩放到 size x size 并转为 ASCII 字符块，便于快速目视检查集中度。"""
+        """
+        将模糊核缩放到指定尺寸并转为 ASCII 字符块，便于快速目视检查集中度。
+
+        参数:
+            k (torch.Tensor): 模糊核，形状 [kH, kW]。
+            size (int): 输出 ASCII 方阵的尺寸（size x size）。默认 11。
+
+        返回:
+            str: ASCII 艺术字符画，用灰度字符表示核的分布，
+                从 ' ' （最弱）到 '@' （最强）。
+        """
         import torch.nn.functional as F
-        k2 = k.unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
-        k2 = F.interpolate(k2, size=(size, size), mode='bilinear', align_corners=False)
+        k2 = k.unsqueeze(dim=0).unsqueeze(dim=0)  # [1,1,H,W]
+        k2 = F.interpolate(input=k2, size=(size, size), mode='bilinear', align_corners=False)
         k2 = k2[0,0]
         chars = " .:-=+*#%@"  # 10级
         mx = k2.max().item() + 1e-12
@@ -96,6 +121,16 @@ def main():
         return '\n'.join(out_lines)
 
     def generator_weight_stats(G: torch.nn.Module) -> str:
+        """
+        提取生成器每个波段链的首层与末层权重统计信息。
+
+        参数:
+            G (torch.nn.Module): MultiBandLinearGenerator 实例。
+
+        返回:
+            str: 每个波段链的权重范数和最大值，格式如：
+                'B0(L0n=0.123,Ln=0.456) B1(L0n=0.234,Ln=0.567) ...'
+        """
         vals = []
         # 每个波段链的首层与末层权重统计
         for b, chain in enumerate(G.chains):
@@ -108,9 +143,9 @@ def main():
 
     for t in range(iters):
         # 采样补丁 [B,5,P,P]（避开无效区域）
-        patches = sample_patches(img, patch_size=patch_size, batch_size=batch_size, valid_mask=valid_mask)
+        patches = sample_patches(img=img, patch_size=patch_size, batch_size=batch_size, valid_mask=valid_mask)
         # 真实下采样保持 5 通道；生成器输出亦为 5 通道
-        real_ds = torch.nn.functional.avg_pool2d(patches, kernel_size=2, stride=2)  # [B,5,P/2,P/2]
+        real_ds = torch.nn.functional.avg_pool2d(input=patches, kernel_size=2, stride=2)  # [B,5,P/2,P/2]
         fake_ds = G(patches)  # [B,5,P/2,P/2]
 
         # 训练D
@@ -127,8 +162,8 @@ def main():
         # 对每个波段核分别做正则再求平均
         reg_list = []
         for i in range(ks_band.shape[0]):
-            reg_list.append(kernel_regularization(ks_band[i], alpha=0.5, beta=0.5, gamma=5.0, delta=1.0))
-        loss_reg = torch.mean(torch.stack(reg_list))
+            reg_list.append(kernel_regularization(k=ks_band[i], alpha=0.5, beta=0.5, gamma=5.0, delta=1.0))
+        loss_reg = torch.mean(input=torch.stack(tensors=reg_list))
         k = ks_band.mean(dim=0)  # 用于后续单核统计（合并核）
         loss_G = loss_G_adv + loss_reg
         opt_G.zero_grad(); loss_G.backward(); opt_G.step()

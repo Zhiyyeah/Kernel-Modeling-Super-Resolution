@@ -11,17 +11,20 @@ from netCDF4 import Dataset
 def load_nc_to_5band(nc_path: str) -> tuple[torch.Tensor, torch.Tensor]:
     """
     读取 NetCDF 文件的 geophysical_data 组的五个波段（保留多通道）。
-    输入:
-        nc_path (str): NetCDF 文件路径（.nc）
-    输出:
+
+    参数:
+        nc_path (str): NetCDF 文件路径（.nc 文件）。
+
+    返回:
         tuple[torch.Tensor, torch.Tensor]: 
-            - 形状 [5, H, W]，值范围 [0, 1]
-            - 形状 [H, W]，有效像素掩码（True=有效，False=NaN区域）
+            - image: 形状 [5, H, W]，归一化后的 5 波段图像，值范围 [0, 1]。
+            - valid_mask: 形状 [H, W]，有效像素掩码（True=有效，False=NaN区域）。
+
     处理流程:
-        1. 读取 5 个波段变量（L_TOA_443/490/555/660/865_masked）
-        2. 创建有效像素掩码（标记 <= -9998.5 为无效）
-        3. 对每个波段做百分位归一化（1%-99%，仅对有效像素）
-        4. 返回 5 通道张量和掩码
+        1. 读取 5 个波段变量（L_TOA_443/490/555/660/865_masked）。
+        2. 创建有效像素掩码（标记 <= -9998.5 为无效）。
+        3. 对每个波段做百分位归一化（1%-99%，仅对有效像素）。
+        4. 返回 5 通道张量和掩码。
     """
     ds = Dataset(nc_path, 'r')
     grp = ds.groups.get('geophysical_data')
@@ -35,10 +38,10 @@ def load_nc_to_5band(nc_path: str) -> tuple[torch.Tensor, torch.Tensor]:
         bands.append(arr)
     ds.close()
     
-    stack = np.stack(bands, axis=0)  # [5, H, W]
+    stack = np.stack(arrays=bands, axis=0)  # [5, H, W]
     
     # 创建有效像素掩码：所有波段都有效才认为该像素有效
-    valid_mask = np.all(stack > -9998.5, axis=0)  # [H, W]
+    valid_mask = np.all(a=stack > -9998.5, axis=0)  # [H, W]
     
     # 对每个波段做百分位归一化到 [0,1]（仅对有效像素）
     for c in range(stack.shape[0]):
@@ -49,32 +52,35 @@ def load_nc_to_5band(nc_path: str) -> tuple[torch.Tensor, torch.Tensor]:
             vmax = np.percentile(valid_values, 99.99)
             if vmax <= vmin:
                 vmax = vmin + 1.0
-            stack[c] = np.clip((band - vmin)/(vmax - vmin), 0, 1)
+            stack[c] = np.clip(a=(band - vmin)/(vmax - vmin), a_min=0, a_max=1)
         else:
             stack[c] = 0.0  # 如果没有有效值，填充0（但会被掩码标记为无效）
     
     # 返回 5 通道张量 [5, H, W] 和掩码 [H, W]
-    t = torch.from_numpy(stack.astype(np.float32))
-    mask = torch.from_numpy(valid_mask)
+    t = torch.from_numpy(ndarray=stack.astype(np.float32))
+    mask = torch.from_numpy(ndarray=valid_mask)
     return t, mask
 
 
 def gradient_weight_map(img: torch.Tensor, valid_mask: torch.Tensor = None, eps: float = 1e-6) -> torch.Tensor:
     """
     计算图像梯度幅值作为采样权重图（梯度大的区域采样概率更高）。
-    输入:
-        img (torch.Tensor): 形状 [C, H, W]（支持多通道）
-        valid_mask (torch.Tensor): 形状 [H, W]，有效像素掩码（True=有效）
-        eps (float): 避免梯度为0的小常数
-    输出:
-        torch.Tensor: 形状 [H, W]，归一化的概率图（和为1，无效区域概率为0）
+
+    参数:
+        img (torch.Tensor): 输入图像，形状 [C, H, W]（支持多通道）。
+        valid_mask (torch.Tensor, optional): 有效像素掩码，形状 [H, W]，True=有效。
+            默认 None（全部有效）。
+        eps (float): 避免梯度为0的小常数。默认 1e-6。
+
+    返回:
+        torch.Tensor: 形状 [H, W]，归一化的概率图（和为1，无效区域概率为0）。
     """
     # 计算水平和垂直梯度（跨所有通道）
     gx = img[:, :, 1:] - img[:, :, :-1]  # [C, H, W-1]
     gy = img[:, 1:, :] - img[:, :-1, :]  # [C, H-1, W]
     
     # 梯度幅值（补齐边界后在通道维度求平均）
-    mag = F.pad(torch.sqrt(F.pad(gx, (0,1))**2 + F.pad(gy, (0,0,0,1))**2 + eps), (0,0,0,0))
+    mag = F.pad(input=torch.sqrt(F.pad(input=gx, pad=(0,1))**2 + F.pad(input=gy, pad=(0,0,0,1))**2 + eps), pad=(0,0,0,0))
     p = mag.mean(dim=0)  # [H, W] 跨通道平均
     
     # 将无效区域的梯度权重置零
@@ -89,7 +95,7 @@ def gradient_weight_map(img: torch.Tensor, valid_mask: torch.Tensor = None, eps:
         if valid_mask is not None:
             p = valid_mask.float() / valid_mask.float().sum().clamp(min=1.0)
         else:
-            p = torch.ones_like(p) / p.numel()
+            p = torch.ones_like(input=p) / p.numel()
     else:
         p = p / s
     return p
@@ -98,20 +104,23 @@ def gradient_weight_map(img: torch.Tensor, valid_mask: torch.Tensor = None, eps:
 def sample_patches(img: torch.Tensor, patch_size: int, batch_size: int, valid_mask: torch.Tensor = None, max_tries: int = 1000) -> torch.Tensor:
     """
     从单张图像中按梯度权重随机裁剪补丁（KernelGAN 采样策略），避开无效区域。
-    输入:
-        img (torch.Tensor): 形状 [C, H, W]，多通道图像（如 5 波段）
-        patch_size (int): 补丁边长（如 64）
-        batch_size (int): 一批采样的补丁数量（如 8）
-        valid_mask (torch.Tensor): 形状 [H, W]，有效像素掩码（True=有效，False=NaN区域）
-        max_tries (int): 最大重试次数
-    输出:
-        torch.Tensor: 形状 [B, C, patch_size, patch_size]，批量补丁（确保补丁内全部为有效像素）
-    
+
+    参数:
+        img (torch.Tensor): 输入图像，形状 [C, H, W]，多通道图像（如 5 波段）。
+        patch_size (int): 补丁边长（如 64）。
+        batch_size (int): 一批采样的补丁数量（如 8）。
+        valid_mask (torch.Tensor, optional): 有效像素掩码，形状 [H, W]，
+            True=有效，False=NaN区域。默认 None（全部有效）。
+        max_tries (int): 每个补丁的最大重试次数。默认 1000。
+
+    返回:
+        torch.Tensor: 形状 [B, C, patch_size, patch_size]，批量补丁（确保补丁内全部为有效像素）。
+
     采样策略:
-        1. 计算梯度权重图（无效区域权重为0）
-        2. 边界区域（patch_size//2）置零，避免越界
-        3. 按概率采样坐标，采样后检查补丁是否全部有效，无效则重采样
-        4. 裁剪对应的补丁
+        1. 计算梯度权重图（无效区域权重为0）。
+        2. 边界区域（patch_size//2）置零，避免越界。
+        3. 按概率采样坐标，采样后检查补丁是否全部有效，无效则重采样。
+        4. 裁剪对应的补丁。
     """
     H, W = img.shape[-2], img.shape[-1]
     p = gradient_weight_map(img, valid_mask)  # [H, W] 概率图
@@ -137,7 +146,7 @@ def sample_patches(img: torch.Tensor, patch_size: int, batch_size: int, valid_ma
     for _ in range(batch_size):
         for attempt in range(max_tries):
             # 采样一个坐标
-            idx = torch.multinomial(flat, 1, replacement=True).item()
+            idx = torch.multinomial(input=flat, num_samples=1, replacement=True).item()
             y = idx // W
             x = idx % W
             y0 = y - pad
@@ -156,7 +165,7 @@ def sample_patches(img: torch.Tensor, patch_size: int, batch_size: int, valid_ma
         else:
             raise ValueError(f"尝试{max_tries}次后仍无法采样到全有效补丁，请检查有效区域是否足够大")
     
-    return torch.stack(patches, dim=0)  # [B, C, patch_size, patch_size]
+    return torch.stack(tensors=patches, dim=0)  # [B, C, patch_size, patch_size]
 
 
 if __name__ == "__main__":
