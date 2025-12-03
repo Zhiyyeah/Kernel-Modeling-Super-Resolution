@@ -1,12 +1,14 @@
 """
 数据加载与补丁采样模块
-- 输入: 单张图片路径（NetCDF .nc 文件）
+- 输入: 单张图片路径（NetCDF .nc 文件）或 patch 文件夹路径
 - 输出: 批量的 Image Patches (Tensor) [B, 5, patch_size, patch_size]（5波段）
 """
 import torch
 import torch.nn.functional as F
 import numpy as np
 from netCDF4 import Dataset
+import os
+import glob
 
 def load_nc_to_5band(nc_path: str) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -166,6 +168,91 @@ def sample_patches(img: torch.Tensor, patch_size: int, batch_size: int, valid_ma
             raise ValueError(f"尝试{max_tries}次后仍无法采样到全有效补丁，请检查有效区域是否足够大")
     
     return torch.stack(tensors=patches, dim=0)  # [B, C, patch_size, patch_size]
+
+
+def load_patches_from_folder(patch_dir: str, target_size: int = 64) -> tuple[list, int]:
+    """
+    从文件夹加载所有.npy格式的patch文件
+    
+    参数:
+        patch_dir (str): patch文件夹路径
+        target_size (int): 目标patch大小，如果patch大小不匹配会进行裁剪/调整，默认64
+    
+    返回:
+        tuple[list, int]: 
+            - patches_list: patch文件路径列表
+            - original_size: 原始patch大小（从第一个文件读取）
+    """
+    patch_files = sorted(glob.glob(os.path.join(patch_dir, '*.npy')))
+    
+    if len(patch_files) == 0:
+        raise ValueError(f"在 {patch_dir} 中没有找到 .npy 文件")
+    
+    # 读取第一个patch来获取原始尺寸
+    first_patch = np.load(patch_files[0])  # [5, H, W]
+    original_size = first_patch.shape[1]  # 假设是正方形patch
+    
+    print(f"找到 {len(patch_files)} 个patch文件")
+    print(f"原始patch尺寸: {first_patch.shape}")
+    
+    return patch_files, original_size
+
+
+def sample_patches_from_files(patch_files: list, batch_size: int, target_size: int = 64, 
+                               original_size: int = 128, device: torch.device = None) -> torch.Tensor:
+    """
+    从预先保存的patch文件中随机采样一批，并调整到目标尺寸
+    
+    参数:
+        patch_files (list): patch文件路径列表
+        batch_size (int): 批次大小
+        target_size (int): 目标patch大小，默认64
+        original_size (int): 原始patch大小，默认128
+        device (torch.device, optional): 目标设备
+    
+    返回:
+        torch.Tensor: 形状 [B, 5, target_size, target_size]
+    """
+    # 随机选择batch_size个文件
+    selected_indices = torch.randint(low=0, high=len(patch_files), size=(batch_size,))
+    
+    patches = []
+    for idx in selected_indices:
+        # 加载patch [5, original_size, original_size]
+        patch = np.load(patch_files[idx.item()])
+        patch_tensor = torch.from_numpy(patch.astype(np.float32))
+        
+        # 处理NaN值：替换为0（或者可以选择跳过这个patch）
+        patch_tensor = torch.nan_to_num(patch_tensor, nan=0.0)
+        
+        # 归一化到[0,1]（如果数据还未归一化）
+        # 检查是否需要归一化（假设如果有值>1则需要归一化）
+        if patch_tensor.max() > 1.0:
+            for c in range(patch_tensor.shape[0]):
+                band = patch_tensor[c]
+                valid_values = band[band > 0]  # 排除0值
+                if len(valid_values) > 0:
+                    vmin = valid_values.min()
+                    vmax = valid_values.max()
+                    if vmax > vmin:
+                        patch_tensor[c] = torch.clip(input=(band - vmin) / (vmax - vmin), min=0, max=1)
+        
+        # 如果原始尺寸不等于目标尺寸，进行调整
+        if original_size != target_size:
+            # 使用双线性插值调整大小
+            patch_tensor = F.interpolate(input=patch_tensor.unsqueeze(0), 
+                                        size=(target_size, target_size), 
+                                        mode='bilinear', 
+                                        align_corners=False).squeeze(0)
+        
+        patches.append(patch_tensor)
+    
+    result = torch.stack(tensors=patches, dim=0)  # [B, 5, target_size, target_size]
+    
+    if device is not None:
+        result = result.to(device)
+    
+    return result
 
 
 if __name__ == "__main__":
