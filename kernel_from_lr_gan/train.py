@@ -40,39 +40,10 @@ def load_patches_from_folder(patch_dir: str) -> tuple[list, int]:
     return patch_files, original_size
 
 
-def gradient_weight_map(img: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """
-    计算图像梯度幅值作为采样权重图（梯度大的区域采样概率更高）。
-    
-    参数:
-        img (torch.Tensor): 输入图像，形状 [C, H, W]（支持多通道）。
-        eps (float): 避免梯度为0的小常数。默认 1e-6。
-    
-    返回:
-        torch.Tensor: 形状 [H, W]，归一化的概率图（和为1）。
-    """
-    # 计算水平和垂直梯度（跨所有通道）
-    gx = img[:, :, 1:] - img[:, :, :-1]  # [C, H, W-1]
-    gy = img[:, 1:, :] - img[:, :-1, :]  # [C, H-1, W]
-    
-    # 梯度幅值（补齐边界后在通道维度求平均）
-    mag = F.pad(input=torch.sqrt(F.pad(input=gx, pad=(0,1))**2 + F.pad(input=gy, pad=(0,0,0,1))**2 + eps), pad=(0,0,0,0))
-    p = mag.mean(dim=0)  # [H, W] 跨通道平均
-    
-    # 归一化为概率分布
-    p = p - p.min()
-    s = p.sum()
-    if s <= 0:
-        p = torch.ones_like(input=p) / p.numel()
-    else:
-        p = p / s
-    return p
-
-
 def sample_patches_from_files(patch_files: list, batch_size: int, target_size: int = 128, 
-                               original_size: int = 128, device: torch.device = None, max_tries: int = 1000) -> torch.Tensor:
+                               original_size: int = 128, device: torch.device = None) -> torch.Tensor:
     """
-    从预先保存的patch文件中按梯度权重随机采样一批，并调整到目标尺寸
+    从预先保存的patch文件中完全随机采样一批，并调整到目标尺寸
     
     参数:
         patch_files (list): patch文件路径列表
@@ -80,7 +51,6 @@ def sample_patches_from_files(patch_files: list, batch_size: int, target_size: i
         target_size (int): 目标patch大小，默认128
         original_size (int): 原始patch大小，默认128
         device (torch.device, optional): 目标设备
-        max_tries (int): 每个patch的最大重试次数。默认1000
     
     返回:
         torch.Tensor: 形状 [B, 5, target_size, target_size]
@@ -104,32 +74,22 @@ def sample_patches_from_files(patch_files: list, batch_size: int, target_size: i
                 f"这表示patch质量不足，应该在生成阶段就被过滤掉。"
             )
         
-        # 如果原始尺寸不等于目标尺寸，按梯度权重采样子patch
+        # 如果原始尺寸不等于目标尺寸，随机裁剪子patch
         if original_size != target_size:
             H, W = patch_tensor.shape[-2], patch_tensor.shape[-1]
-            p = gradient_weight_map(patch_tensor)  # [H, W] 概率图
             
-            # 将边界区域的概率置零（避免裁剪时越界）
-            pad = target_size // 2
-            grid = p.clone()
-            grid[:pad, :] = 0
-            grid[-pad:, :] = 0
-            grid[:, :pad] = 0
-            grid[:, -pad:] = 0
+            # 计算可裁剪的范围
+            max_y = H - target_size
+            max_x = W - target_size
             
-            # 重新归一化
-            s = grid.sum()
-            if s <= 0:
-                raise ValueError(f"Patch {patch_files[idx.item()]} 没有有效区域可供采样（可能全是边界），请检查patch大小")
-            grid = grid / s
+            if max_y <= 0 or max_x <= 0:
+                raise ValueError(
+                    f"Patch尺寸 {H}x{W} 小于目标尺寸 {target_size}x{target_size}，无法裁剪"
+                )
             
-            # 按梯度权重采样坐标
-            flat = grid.view(-1)
-            sampled_idx = torch.multinomial(input=flat, num_samples=1, replacement=True).item()
-            y = sampled_idx // W
-            x = sampled_idx % W
-            y0 = y - pad
-            x0 = x - pad
+            # 完全随机选择裁剪起始位置
+            y0 = torch.randint(0, max_y + 1, (1,)).item()
+            x0 = torch.randint(0, max_x + 1, (1,)).item()
             
             # 裁剪patch
             patch_tensor = patch_tensor[:, y0:y0+target_size, x0:x0+target_size]

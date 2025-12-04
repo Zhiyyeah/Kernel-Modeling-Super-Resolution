@@ -30,57 +30,29 @@ def load_kernel(kernel_path):
     return kernel_tensor
 
 
-def load_landsat_nc(nc_path, band_names=None):
+def load_landsat_npy(npy_path):
     """
-    读取Landsat NC文件（GOCI-2格式）
+    读取Landsat NPY文件
     参数:
-        nc_path (str): NC文件路径
-        band_names (list, optional): 要读取的波段名称列表
+        npy_path (str): NPY文件路径
     返回:
         torch.Tensor: 影像数据 [n_bands, H, W]
-        list: 实际读取的波段名称
+        list: 波段名称列表
     """
-    ds = Dataset(nc_path, 'r')
+    # 读取npy文件
+    data = np.load(npy_path)
+    
+    # 转换为tensor
+    img_tensor = torch.from_numpy(data.astype(np.float32))
+    
+    # 生成波段名称
     wl = [443, 490, 555, 660, 865]
-    
-    # 获取 geophysical_data 组
-    if 'geophysical_data' in ds.groups:
-        grp = ds.groups['geophysical_data']
-    else:
-        # 如果没有组，直接从根读取
-        grp = ds
-    # 如果没有指定波段名称，使用GOCI-2的5个波段
-    if band_names is None:
-        band_names = [f'L_TOA_{w}' for w in wl]
-    
-    print(f"读取波段: {band_names}")
-    
-    # 读取数据
-    bands = []
-    actual_bands = []
-    for name in band_names:
-        if name not in grp.variables:
-            print(f"警告: 波段 {name} 不存在，跳过")
-            continue
-        
-        data = grp.variables[name][:]
-        
-        bands.append(data.astype(np.float32))
-        actual_bands.append(name)
-    
-    ds.close()
-    
-    if len(bands) == 0:
-        raise ValueError(f"没有成功读取任何波段数据")
-    
-    # 堆叠为 [n_bands, H, W]
-    img = np.stack(bands, axis=0)
-    img_tensor = torch.from_numpy(img)
+    band_names = [f'L_TOA_{w}' for w in wl[:img_tensor.shape[0]]]
     
     print(f"影像形状: {img_tensor.shape}")
     print(f"数值范围: [{img_tensor.min().item():.2f}, {img_tensor.max().item():.2f}]")
     
-    return img_tensor, actual_bands
+    return img_tensor, band_names
 
 
 def apply_kernel_degradation(img, kernel, downscale_factor=8):
@@ -141,40 +113,39 @@ def apply_kernel_degradation(img, kernel, downscale_factor=8):
     return lr_img.squeeze(0)  # [C, H//downscale_factor, W//downscale_factor]
 
 
-def process_landsat_folder(landsat_dir, kernel_path, output_dir, band_names=None):
+def process_landsat_folder(landsat_dir, kernel_path, output_dir):
     """
-    批量处理Landsat文件夹中的所有NC文件
+    批量处理Landsat文件夹中的所有NPY文件
     
     参数:
-        landsat_dir (str): Landsat NC文件夹路径
+        landsat_dir (str): Landsat NPY文件夹路径
         kernel_path (str): 模糊核文件路径
         output_dir (str): 输出文件夹路径
-        band_names (list, optional): 要处理的波段名称
     """
     # 加载模糊核
     kernel = load_kernel(kernel_path)
     
-    # 查找所有NC文件
-    nc_files = sorted(glob.glob(os.path.join(landsat_dir, '*.nc')))
+    # 查找所有NPY文件
+    npy_files = sorted(glob.glob(os.path.join(landsat_dir, '*.npy')))
     
-    if len(nc_files) == 0:
-        print(f"在 {landsat_dir} 中没有找到 .nc 文件")
+    if len(npy_files) == 0:
+        print(f"在 {landsat_dir} 中没有找到 .npy 文件")
         return
     
-    print(f"\n找到 {len(nc_files)} 个Landsat文件")
+    print(f"\n找到 {len(npy_files)} 个Landsat文件")
     
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)
     
     # 处理每个文件
-    for idx, nc_file in enumerate(nc_files):
+    for idx, npy_file in enumerate(npy_files):
         print(f"\n{'='*60}")
-        print(f"处理 [{idx+1}/{len(nc_files)}]: {os.path.basename(nc_file)}")
+        print(f"处理 [{idx+1}/{len(npy_files)}]: {os.path.basename(npy_file)}")
         print('='*60)
         
         try:
             # 读取Landsat数据
-            img, actual_bands = load_landsat_nc(nc_file, band_names)
+            img, band_names = load_landsat_npy(npy_file)
             
             # 应用模糊核降分辨率
             lr_img = apply_kernel_degradation(img, kernel, downscale_factor=8)
@@ -182,15 +153,15 @@ def process_landsat_folder(landsat_dir, kernel_path, output_dir, band_names=None
             print(f"降分辨率结果: {img.shape} -> {lr_img.shape}")
             
             # 保存结果
-            output_name = os.path.basename(nc_file).replace('.nc', '_lr.npy')
+            output_name = os.path.basename(npy_file).replace('.npy', '_lr.npy')
             output_path = os.path.join(output_dir, output_name)
             np.save(output_path, lr_img.numpy())
             print(f"已保存: {output_path}")
             
             # 可视化对比（可选）
             if idx < 3:  # 只可视化前3个
-                visualize_comparison(img, lr_img, actual_bands, output_dir, 
-                                    os.path.basename(nc_file).replace('.nc', ''))
+                visualize_comparison(img, lr_img, band_names, output_dir, 
+                                    os.path.basename(npy_file).replace('.npy', ''))
         
         except Exception as e:
             print(f"处理失败: {e}")
@@ -251,17 +222,15 @@ def main():
     # ========== 配置参数 ==========
     
     # Landsat数据文件夹（需要修改为实际路径）
-    landsat_dir = '/path/to/landsat/folder'  # TODO: 修改为实际路径
+    landsat_dir = '/Users/zy/Downloads/Landsat/patches_all'  # TODO: 修改为实际路径
     
     # 模糊核文件路径
-    kernel_path = 'kernelgan_out/kernel_per_band.npy'  # 或 'kernelgan_out/kernel_merged.npy'
+    kernel_path = '/Users/zy/Python_code/My_Git/Kernel-Modeling-Super-Resolution/kernelgan_out/kernel_per_band_iter900.npy'  # 或 'kernelgan_out/kernel_merged.npy'
     
     # 输出文件夹
     output_dir = 'landsat_lr_output'
     
-    # Landsat波段名称（根据实际NC文件结构修改）
-    # 如果设为None，会自动尝试检测
-    band_names = None  # 例如: ['band1', 'band2', 'band3', 'band4', 'band5']
+    # Landsat波段名称（自动生成，无需手动指定）
     
     # ========== 执行处理 ==========
     
@@ -286,7 +255,7 @@ def main():
         return
     
     # 处理文件夹
-    process_landsat_folder(landsat_dir, kernel_path, output_dir, band_names)
+    process_landsat_folder(landsat_dir, kernel_path, output_dir)
 
 
 if __name__ == "__main__":

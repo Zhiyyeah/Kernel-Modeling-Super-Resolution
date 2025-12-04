@@ -25,13 +25,13 @@ class MultiBandLinearGenerator(nn.Module):
         chains = []
         for _ in range(in_ch):
             convs = nn.ModuleList()
-            # 第一层：1 -> mid_ch
-            convs.append(nn.Conv2d(in_channels=1, out_channels=mid_ch, kernel_size=ks[0], stride=1, padding=ks[0]//2, bias=False))
+            # 第一层：1 -> mid_ch（使用反射填充）
+            convs.append(nn.Conv2d(in_channels=1, out_channels=mid_ch, kernel_size=ks[0], stride=1, padding=ks[0]//2, bias=False, padding_mode='reflect'))
             # 中间层：mid_ch -> mid_ch
             for ksize in ks[1:-1]:
-                convs.append(nn.Conv2d(in_channels=mid_ch, out_channels=mid_ch, kernel_size=ksize, stride=1, padding=ksize//2, bias=False))
+                convs.append(nn.Conv2d(in_channels=mid_ch, out_channels=mid_ch, kernel_size=ksize, stride=1, padding=ksize//2, bias=False, padding_mode='reflect'))
             # 最后一层：mid_ch -> 1
-            convs.append(nn.Conv2d(in_channels=mid_ch, out_channels=1, kernel_size=ks[-1], stride=1, padding=ks[-1]//2, bias=False))
+            convs.append(nn.Conv2d(in_channels=mid_ch, out_channels=1, kernel_size=ks[-1], stride=1, padding=ks[-1]//2, bias=False, padding_mode='reflect'))
             chains.append(convs)
         self.chains = nn.ModuleList(chains)
         # 8倍下采样：3个2倍下采样级联 (2 * 2 * 2 = 8)
