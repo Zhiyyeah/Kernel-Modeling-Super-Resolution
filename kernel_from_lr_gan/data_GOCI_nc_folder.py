@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from netCDF4 import Dataset
 
 PATCH_SIZE = 128  # 覆盖默认值
-def create_patches(data, patch_size=PATCH_SIZE, nan_threshold=0.05, output_dir=None, prefix='patch'):
+def create_patches(data, patch_size=PATCH_SIZE, nan_threshold=0.0, output_dir=None, prefix='patch'):
     """
     将数据划分成patch并过滤掉NaN过多的patch
     

@@ -1,7 +1,9 @@
 import os
 import sys
+import glob
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 
 # 保证本文件夹内模块可导入，无论从何处执行脚本
@@ -11,7 +13,135 @@ if CURRENT_DIR not in sys.path:
 
 from networks import MultiBandLinearGenerator, PatchDiscriminator
 from loss import lsgan_d_loss, lsgan_g_loss, kernel_regularization
-from training_code.kernel_from_lr_gan.data_single_GOCI import load_patches_from_folder, sample_patches_from_files
+
+
+def load_patches_from_folder(patch_dir: str) -> tuple[list, int]:
+    """
+    从文件夹加载所有.npy格式的patch文件
+    参数:
+        patch_dir (str): patch文件夹路径
+    返回:
+        tuple[list, int]: 
+            - patches_list: patch文件路径列表
+            - original_size: 原始patch大小（从第一个文件读取）
+    """
+    patch_files = sorted(glob.glob(os.path.join(patch_dir, '*.npy')))
+    
+    if len(patch_files) == 0:
+        raise ValueError(f"在 {patch_dir} 中没有找到 .npy 文件")
+    
+    # 读取第一个patch来获取原始尺寸
+    first_patch = np.load(patch_files[0])  # [5, H, W]
+    original_size = first_patch.shape[1]  # 假设是正方形patch
+    
+    print(f"找到 {len(patch_files)} 个patch文件")
+    print(f"原始patch尺寸: {first_patch.shape}")
+    
+    return patch_files, original_size
+
+
+def gradient_weight_map(img: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    计算图像梯度幅值作为采样权重图（梯度大的区域采样概率更高）。
+    
+    参数:
+        img (torch.Tensor): 输入图像，形状 [C, H, W]（支持多通道）。
+        eps (float): 避免梯度为0的小常数。默认 1e-6。
+    
+    返回:
+        torch.Tensor: 形状 [H, W]，归一化的概率图（和为1）。
+    """
+    # 计算水平和垂直梯度（跨所有通道）
+    gx = img[:, :, 1:] - img[:, :, :-1]  # [C, H, W-1]
+    gy = img[:, 1:, :] - img[:, :-1, :]  # [C, H-1, W]
+    
+    # 梯度幅值（补齐边界后在通道维度求平均）
+    mag = F.pad(input=torch.sqrt(F.pad(input=gx, pad=(0,1))**2 + F.pad(input=gy, pad=(0,0,0,1))**2 + eps), pad=(0,0,0,0))
+    p = mag.mean(dim=0)  # [H, W] 跨通道平均
+    
+    # 归一化为概率分布
+    p = p - p.min()
+    s = p.sum()
+    if s <= 0:
+        p = torch.ones_like(input=p) / p.numel()
+    else:
+        p = p / s
+    return p
+
+
+def sample_patches_from_files(patch_files: list, batch_size: int, target_size: int = 128, 
+                               original_size: int = 128, device: torch.device = None, max_tries: int = 1000) -> torch.Tensor:
+    """
+    从预先保存的patch文件中按梯度权重随机采样一批，并调整到目标尺寸
+    
+    参数:
+        patch_files (list): patch文件路径列表
+        batch_size (int): 批次大小
+        target_size (int): 目标patch大小，默认128
+        original_size (int): 原始patch大小，默认128
+        device (torch.device, optional): 目标设备
+        max_tries (int): 每个patch的最大重试次数。默认1000
+    
+    返回:
+        torch.Tensor: 形状 [B, 5, target_size, target_size]
+    """
+    # 随机选择batch_size个文件
+    selected_indices = torch.randint(low=0, high=len(patch_files), size=(batch_size,))
+    
+    patches = []
+    for idx in selected_indices:
+        # 加载patch [5, original_size, original_size]
+        patch = np.load(patch_files[idx.item()])
+        patch_tensor = torch.from_numpy(patch.astype(np.float32))
+        
+        # 检查NaN值：如果有NaN则直接报错
+        if torch.isnan(patch_tensor).any():
+            nan_count = torch.isnan(patch_tensor).sum().item()
+            nan_ratio = nan_count / patch_tensor.numel() * 100
+            raise ValueError(
+                f"Patch文件包含NaN值: {patch_files[idx.item()]}\n"
+                f"NaN像素数: {nan_count}/{patch_tensor.numel()} ({nan_ratio:.2f}%)\n"
+                f"这表示patch质量不足，应该在生成阶段就被过滤掉。"
+            )
+        
+        # 如果原始尺寸不等于目标尺寸，按梯度权重采样子patch
+        if original_size != target_size:
+            H, W = patch_tensor.shape[-2], patch_tensor.shape[-1]
+            p = gradient_weight_map(patch_tensor)  # [H, W] 概率图
+            
+            # 将边界区域的概率置零（避免裁剪时越界）
+            pad = target_size // 2
+            grid = p.clone()
+            grid[:pad, :] = 0
+            grid[-pad:, :] = 0
+            grid[:, :pad] = 0
+            grid[:, -pad:] = 0
+            
+            # 重新归一化
+            s = grid.sum()
+            if s <= 0:
+                raise ValueError(f"Patch {patch_files[idx.item()]} 没有有效区域可供采样（可能全是边界），请检查patch大小")
+            grid = grid / s
+            
+            # 按梯度权重采样坐标
+            flat = grid.view(-1)
+            sampled_idx = torch.multinomial(input=flat, num_samples=1, replacement=True).item()
+            y = sampled_idx // W
+            x = sampled_idx % W
+            y0 = y - pad
+            x0 = x - pad
+            
+            # 裁剪patch
+            patch_tensor = patch_tensor[:, y0:y0+target_size, x0:x0+target_size]
+        
+        patches.append(patch_tensor)
+    
+    result = torch.stack(tensors=patches, dim=0)  # [B, 5, target_size, target_size]
+    
+    if device is not None:
+        result = result.to(device)
+    
+    return result
 
 
 def main():
@@ -22,12 +152,14 @@ def main():
 
     # 数据路径配置
     patch_dir = '/Users/zy/Downloads/GOCI-2/patches_all'
-    print(f'使用patch文件夹模式: {patch_dir}')
+    print(f'使用patch文件夹: {patch_dir}')
     patch_files, original_patch_size = load_patches_from_folder(patch_dir)
+
+    print(f'原始patch尺寸: {original_patch_size}x{original_patch_size}')
     
     # 训练配置
     iters = 3000
-    patch_size = 16
+    patch_size = 128
     batch_size = 8
     lr_rate = 1e-4
     outdir = './kernelgan_out'
@@ -43,7 +175,7 @@ def main():
     print(f'目标patch尺寸: {patch_size}x{patch_size}')
 
     # 模型（生成器输入 5 通道，输出 5 通道；判别器接受 5 通道）
-    G = MultiBandLinearGenerator(in_ch=5, mid_ch_ch=32) if False else MultiBandLinearGenerator(in_ch=5, mid_ch=32)
+    G = MultiBandLinearGenerator(in_ch=5, mid_ch=32)
     G = G.to(device)
     D = PatchDiscriminator(in_ch=5, base_ch=64, num_blocks=4).to(device)
 
@@ -53,10 +185,8 @@ def main():
     def kernel_metrics(k: torch.Tensor) -> dict:
         """
         计算模糊核的多项统计指标用于监控训练进度。
-
         参数:
             k (torch.Tensor): 模糊核，形状 [kH, kW]，应已归一化（sum≈1）。
-
         返回:
             dict: 包含以下键值对：
                 - k_shape (str): 核尺寸，如 '13x13'。
@@ -92,11 +222,9 @@ def main():
     def ascii_kernel(k: torch.Tensor, size: int = 11) -> str:
         """
         将模糊核缩放到指定尺寸并转为 ASCII 字符块，便于快速目视检查集中度。
-
         参数:
             k (torch.Tensor): 模糊核，形状 [kH, kW]。
             size (int): 输出 ASCII 方阵的尺寸（size x size）。默认 11。
-
         返回:
             str: ASCII 艺术字符画，用灰度字符表示核的分布，
                 从 ' ' （最弱）到 '@' （最强）。
@@ -120,10 +248,8 @@ def main():
     def generator_weight_stats(G: torch.nn.Module) -> str:
         """
         提取生成器每个波段链的首层与末层权重统计信息。
-
         参数:
             G (torch.nn.Module): MultiBandLinearGenerator 实例。
-
         返回:
             str: 每个波段链的权重范数和最大值，格式如：
                 'B0(L0n=0.123,Ln=0.456) B1(L0n=0.234,Ln=0.567) ...'
@@ -139,18 +265,29 @@ def main():
     prev_k = None  # 用于计算核变化幅度
 
     for t in range(iters):
-        # 从patch文件中采样 [B,5,P,P]
+        # 非配对训练：分别采样高分辨率和低分辨率patch
+        
+        # 1. 采样高分辨率patch用于生成器输入 [B,5,128,128]
         patches = sample_patches_from_files(
             patch_files=patch_files,
             batch_size=batch_size,
-            target_size=patch_size,
+            target_size=patch_size,  # 128
             original_size=original_patch_size,
             device=device
         )
         
-        # 真实下采样保持 5 通道；生成器输出亦为 5 通道
-        real_ds = torch.nn.functional.avg_pool2d(input=patches, kernel_size=2, stride=2)  # [B,5,P/2,P/2]
-        fake_ds = G(patches)  # [B,5,P/2,P/2]
+        # 2. 采样真实的低分辨率patch作为判别器真值 [B,5,16,16]
+        # 这是独立采样的，不是通过数学下采样得到的
+        real_ds = sample_patches_from_files(
+            patch_files=patch_files,
+            batch_size=batch_size,
+            target_size=16,  # 直接采样16x16，保留真实的模糊特性
+            original_size=original_patch_size,
+            device=device
+        )
+        
+        # 3. 生成器输出：通过学习到的退化核生成低分辨率 [B,5,16,16]
+        fake_ds = G(patches)
 
         # 训练D
         D.train(); G.train()
