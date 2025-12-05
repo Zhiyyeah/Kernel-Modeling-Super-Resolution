@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from netCDF4 import Dataset
 
-PATCH_SIZE = 128  # 覆盖默认值
+PATCH_SIZE = 256  # 覆盖默认值
 def create_patches(data, patch_size=PATCH_SIZE, nan_threshold=0.0, output_dir=None, prefix='patch'):
     """
     将数据划分成patch并过滤掉NaN过多的patch
@@ -30,13 +30,15 @@ def create_patches(data, patch_size=PATCH_SIZE, nan_threshold=0.0, output_dir=No
     total_patches = 0
     kept_patches = 0
     
-    # 计算可以生成的patch数量
-    h_patches = height // patch_size
-    w_patches = width // patch_size
+    # 步长为patch大小的一半（50% 重叠）
+    stride = patch_size // 2
+    h_patches = (height - patch_size) // stride + 1
+    w_patches = (width - patch_size) // stride + 1
     
     print(f"\n开始生成patch...")
     print(f"输入数据尺寸: {data.shape}")
     print(f"Patch大小: {patch_size}x{patch_size}")
+    print(f"步长: {stride} (50% 重叠)")
     print(f"可生成的patch网格: {h_patches}x{w_patches} = {h_patches*w_patches}个")
     
     for i in range(h_patches):
@@ -44,9 +46,9 @@ def create_patches(data, patch_size=PATCH_SIZE, nan_threshold=0.0, output_dir=No
             total_patches += 1
             
             # 提取patch
-            h_start = i * patch_size
+            h_start = i * stride
             h_end = h_start + patch_size
-            w_start = j * patch_size
+            w_start = j * stride
             w_end = w_start + patch_size
             
             patch = data[:, h_start:h_end, w_start:w_end]

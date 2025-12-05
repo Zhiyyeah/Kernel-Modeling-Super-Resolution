@@ -119,7 +119,7 @@ def main():
     
     # 训练配置
     iters = 3000
-    patch_size = 128
+    patch_size = 256
     batch_size = 8
     lr_rate = 1e-4
     outdir = './kernelgan_out'
@@ -236,17 +236,17 @@ def main():
             device=device
         )
         
-        # 2. 采样真实的低分辨率patch作为判别器真值 [B,5,16,16]
+        # 2. 采样真实的低分辨率patch作为判别器真值 [B,5,32, 32]
         # 这是独立采样的，不是通过数学下采样得到的
         real_ds = sample_patches_from_files(
             patch_files=patch_files,
             batch_size=batch_size,
-            target_size=16,  # 直接采样16x16，保留真实的模糊特性
+            target_size=32,  # 直接采样32x32，保留真实的模糊特性
             original_size=original_patch_size,
             device=device
         )
         
-        # 3. 生成器输出：通过学习到的退化核生成低分辨率 [B,5,16,16]
+        # 3. 生成器输出：通过学习到的退化核生成低分辨率 [B,5,32,32]
         fake_ds = G(patches)
 
         # 训练D

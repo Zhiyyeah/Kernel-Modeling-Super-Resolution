@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from netCDF4 import Dataset
 import glob
 
-PATCH_SIZE = 128  # 与GOCI处理保持一致
+PATCH_SIZE = 256  # 与GOCI处理保持一致
 
 
 def create_patches(data, patch_size=PATCH_SIZE, nan_threshold=0.0, output_dir=None, prefix='patch'):
@@ -17,7 +17,7 @@ def create_patches(data, patch_size=PATCH_SIZE, nan_threshold=0.0, output_dir=No
     
     参数:
         data (np.ndarray): 输入数据 [C, H, W] 或 [H, W]
-        patch_size (int): patch大小，默认128
+        patch_size (int): patch大小，默认256
         nan_threshold (float): NaN像素比例阈值，超过此值的patch将被丢弃，默认0.0
         output_dir (str, optional): 保存patch的目录，如果为None则不保存
         prefix (str): patch文件名前缀
@@ -37,13 +37,15 @@ def create_patches(data, patch_size=PATCH_SIZE, nan_threshold=0.0, output_dir=No
     total_patches = 0
     kept_patches = 0
     
-    # 计算可以生成的patch数量
-    h_patches = height // patch_size
-    w_patches = width // patch_size
+    # 步长为patch大小的一半（50% 重叠）
+    stride = patch_size // 2
+    h_patches = (height - patch_size) // stride + 1
+    w_patches = (width - patch_size) // stride + 1
     
     print(f"\n开始生成patch...")
     print(f"输入数据尺寸: {data.shape}")
     print(f"Patch大小: {patch_size}x{patch_size}")
+    print(f"步长: {stride} (50% 重叠)")
     print(f"可生成的patch网格: {h_patches}x{w_patches} = {h_patches*w_patches}个")
     
     band_names = ['L_TOA_443', 'L_TOA_490', 'L_TOA_555', 'L_TOA_660', 'L_TOA_865']
@@ -53,9 +55,9 @@ def create_patches(data, patch_size=PATCH_SIZE, nan_threshold=0.0, output_dir=No
             total_patches += 1
             
             # 提取patch
-            h_start = i * patch_size
+            h_start = i * stride
             h_end = h_start + patch_size
-            w_start = j * patch_size
+            w_start = j * stride
             w_end = w_start + patch_size
             
             patch = data[:, h_start:h_end, w_start:w_end]
@@ -314,11 +316,11 @@ def main():
             stats = process_landsat_nc(
                 nc_path=nc_file,
                 threshold_min=0.000001,  # 与GOCI处理保持一致
-                threshold_max=7,         # 与GOCI处理保持一致
+                threshold_max=9,         # 与GOCI处理保持一致
                 dpi=600,
                 show_plot=False,
                 create_patch=True,       # 启用patch生成
-                patch_size=PATCH_SIZE,   # 128x128
+                patch_size=PATCH_SIZE,   # 256x256
                 nan_threshold=0.0,       # 0% NaN阈值（与GOCI一致）
                 patch_output_dir=None    # 使用默认目录
             )
