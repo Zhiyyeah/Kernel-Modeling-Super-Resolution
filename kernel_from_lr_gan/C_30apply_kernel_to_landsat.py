@@ -1,7 +1,8 @@
 """
 将训练好的模糊核应用于Landsat数据进行降分辨率
-- 输入: Landsat NC文件 (128x128)
-- 输出: 降分辨率后的影像 (16x16, 8倍下采样)
+- 输入: Landsat NC文件 (任意分辨率，如128x128或256x256)
+- 输出: 降分辨率后的影像 (输入分辨率 / 下采样倍数，默认8倍)
+  例如: 128x128 -> 16x16 (8倍)，或 256x256 -> 32x32 (8倍)
 """
 import os
 import glob
@@ -223,25 +224,29 @@ def visualize_comparison(hr_img, lr_img, band_names, output_dir, filename_prefix
         filename_prefix (str): 文件名前缀
     """
     C = hr_img.shape[0]
-    n_show = min(C, 3)  # 最多显示3个波段
+    n_show = min(C, 5)  # 最多显示5个波段
     
     fig, axes = plt.subplots(2, n_show, figsize=(5*n_show, 10))
     if n_show == 1:
         axes = axes.reshape(2, 1)
     
     for i in range(n_show):
+        # 计算该波段的全局范围（HR和LR的联合范围）
+        hr_band = hr_img[i].numpy()
+        lr_band = lr_img[i].numpy()
+        vmin = min(hr_band.min(), lr_band.min())
+        vmax = max(hr_band.max(), lr_band.max())
+        
         # 高分辨率
         ax = axes[0, i]
-        hr_band = hr_img[i].numpy()
-        im = ax.imshow(hr_band, cmap='gray', interpolation='nearest')
+        im = ax.imshow(hr_band, cmap='viridis', interpolation='nearest', vmin=vmin, vmax=vmax)
         ax.set_title(f'HR - {band_names[i]}\n{hr_band.shape}', fontsize=12, fontweight='bold')
         ax.axis('off')
         plt.colorbar(im, ax=ax, fraction=0.046)
         
         # 低分辨率
         ax = axes[1, i]
-        lr_band = lr_img[i].numpy()
-        im = ax.imshow(lr_band, cmap='gray', interpolation='nearest')
+        im = ax.imshow(lr_band, cmap='viridis', interpolation='nearest', vmin=vmin, vmax=vmax)
         ax.set_title(f'LR - {band_names[i]}\n{lr_band.shape}', fontsize=12, fontweight='bold')
         ax.axis('off')
         plt.colorbar(im, ax=ax, fraction=0.046)
@@ -259,10 +264,10 @@ def main():
     # ========== 配置参数 ==========
     
     # Landsat数据文件夹（NC文件）
-    landsat_dir = '/Users/zy/Downloads/Landsat/patches_all'  # NC文件目录
+    landsat_dir = r"H:\Landsat\patches_all"  # NC文件目录
     
     # 模糊核文件路径
-    kernel_path = '/Users/zy/Python_code/My_Git/Kernel-Modeling-Super-Resolution/kernelgan_out/kernel_per_band_iter3000.npy'  # 或其他核文件
+    kernel_path = r"D:\Py_Code\Kernel-Modeling-Super-Resolution\kernelgan_out\kernel_per_band_iter1800.npy"  # 或其他核文件
     
     # 输出文件夹
     output_dir = 'landsat_lr_output'

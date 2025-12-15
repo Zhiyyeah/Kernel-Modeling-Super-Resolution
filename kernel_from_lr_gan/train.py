@@ -111,7 +111,7 @@ def main():
     print(f'Using device: {device}')
 
     # 数据路径配置
-    patch_dir = '/Users/zy/Downloads/GOCI-2/patches_all'
+    patch_dir = r"H:\GOCI-2\patches_all"
     print(f'使用patch文件夹: {patch_dir}')
     patch_files, original_patch_size = load_patches_from_folder(patch_dir)
 

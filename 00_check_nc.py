@@ -191,7 +191,7 @@ def list_variables_by_group(file_path):
 
 if __name__ == "__main__":
 
-    file_path = r"/Users/zy/Downloads/Landsat/patches_all/LC08_L1TP_116035_20240829_20240905_02_T1_TOA_RAD_B1-2-3-4-5_native_003_016.nc"
+    file_path = r"H:\Landsat\patches_all\LC08_L1TP_116034_20240407_20240412_02_T1_TOA_RAD_B1-2-3-4-5_native_042_005.nc"
 
     
     print("🌊 GOCI2 L1B NetCDF文件分析工具")
