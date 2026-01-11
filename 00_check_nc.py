@@ -1,3 +1,4 @@
+import argparse
 import netCDF4 as nc
 import numpy as np
 import platform
@@ -191,18 +192,31 @@ def list_variables_by_group(file_path):
 
 if __name__ == "__main__":
 
-    file_path = r"H:\Landsat\patches_all\LC08_L1TP_116034_20240407_20240412_02_T1_TOA_RAD_B1-2-3-4-5_native_042_005.nc"
+    parser = argparse.ArgumentParser(description="GOCI2 L1B NetCDF 文件分析工具")
+    parser.add_argument("file_path", help="要分析的 NetCDF 文件路径")
+    parser.add_argument("--full", action="store_true", help="执行详细结构分析")
+    parser.add_argument("--by-group", action="store_true", help="按组列出变量")
+    parser.add_argument("--list-only", action="store_true", help="仅列出所有变量名")
+    args = parser.parse_args()
 
-    
+    # 如果未指定任何分析选项，则默认执行完整分析和按组列出变量
+    any_flag = args.full or args.by_group or args.list_only
+    run_full = args.full or not any_flag
+    run_by_group = args.by_group or not any_flag
+    run_list_only = args.list_only
+
     print("🌊 GOCI2 L1B NetCDF文件分析工具")
     print("=" * 80)
-    
-    # 执行详细分析
-    analyze_goci2_file(file_path)
-    
-    # 快速查看变量名列表
-    print("\n" + "=" * 80)
-    list_variables_by_group(file_path)
-    
-    # 也可以使用简化版本只显示变量名
-    # list_variables_only(file_path)
+
+    if run_full:
+        analyze_goci2_file(args.file_path)
+
+    if run_by_group:
+        if run_full:
+            print("\n" + "=" * 80)
+        list_variables_by_group(args.file_path)
+
+    if run_list_only:
+        if run_full or run_by_group:
+            print("\n" + "=" * 80)
+        list_variables_only(args.file_path)
