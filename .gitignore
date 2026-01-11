@@ -4,3 +4,4 @@ landsat_lr_output/
 *npy
 *txt
 *.log
+*.DS_Store
