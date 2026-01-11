@@ -328,7 +328,7 @@ def main():
             all_stats.append(stats)
             print(f"\n处理完成！")
             
-        except Exception as e:
+        except Exception as e: 
             print(f"\n处理失败: {e}")
             import traceback
             traceback.print_exc()
@@ -343,7 +343,7 @@ def main():
     if all_stats:
         total_patches = sum(s.get('patches', {}).get('kept_patches', 0) for s in all_stats)
         print(f"总共生成: {total_patches} 个有效patch")
-        print(f"Patch保存位置: /Users/zy/Downloads/Landsat/patches_all")
+        print(f"Patch保存位置: {all_stats[0]['patches']['patch_output_dir']}")
 
 
 if __name__ == "__main__":
