@@ -23,7 +23,7 @@ def main() -> None:
 	print(f"Loading: {path}")
 	
     #读取文件
-	arr = read_nc(path, 'geophysical_data')
+	arr = read_nc(path, 'denoised')
 	min_val = float(arr.min().values)
 	max_val = float(arr.max().values)
 	print(f"Min-Max: {min_val:.3f} - {max_val:.3f}")

@@ -3,113 +3,283 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import xarray as xr
-import cv2  # 需要引入 opencv
+from skimage.restoration import denoise_nl_means, estimate_sigma
+
+# ==========================================
+# 1. 核心读取与去噪功能 (保持不变)
+# ==========================================
 
 def read_nc(file_path:str, group_name, band_names = ['L_TOA_443', 'L_TOA_490', 'L_TOA_555', 'L_TOA_660', 'L_TOA_865']):
     """读取NC文件"""
     data = []
     for band_name in band_names:
-        # 打开数据集
-        band_data = xr.open_dataset(file_path, group=group_name)[band_name]
-        data.append(band_data)
-    
-    # 合并波段
+        try:
+            band_data = xr.open_dataset(file_path, group=group_name)[band_name]
+            data.append(band_data)
+        except Exception as e:
+            print(f"Warning: Could not read {band_name}: {e}")
+            
+    if not data:
+        raise ValueError("No bands were read!")
+        
     data_con = xr.concat(data, dim='band')
-    # 将0值设为NaN (注意：去噪前我们需要处理这些NaN)
     data_con = data_con.where(data_con != 0, np.nan)
-    return data_con 
+    return data_con, band_names
 
-def denoise_band(band_data, h_val=10):
+def denoise_band_float_nlm(img_float, h_factor=1.15, patch_size=7, patch_distance=11, verbose=True):
     """
-    专门针对单波段的去噪函数
+    使用 Scikit-Image 进行浮点级 NLM 去噪
+    """
+    # 1. 处理 NaN
+    valid_mask = ~np.isnan(img_float)
+    if not valid_mask.any():
+        return img_float, 0.0 
+    
+    fill_value = np.nanmean(img_float)
+    img_filled = np.nan_to_num(img_float, nan=fill_value).astype(np.float32)
+    
+    # 2. 估计噪声 Sigma
+    estimated_sigma = estimate_sigma(img_filled, average_sigmas=True)
+    
+    # 3. 设定去噪强度 h
+    h_val = h_factor * estimated_sigma
+    if verbose:
+        print(f"    -> Sigma: {estimated_sigma:.6f} | h: {h_val:.6f}")
+
+    # 4. 执行 NLM 去噪
+    denoised = denoise_nl_means(
+        img_filled, 
+        h=h_val, 
+        sigma=estimated_sigma,
+        fast_mode=True, 
+        patch_size=patch_size,
+        patch_distance=patch_distance
+    )
+    
+    # 5. 恢复 NaN
+    denoised_final = np.where(valid_mask, denoised, np.nan)
+    
+    return denoised_final, estimated_sigma
+
+# ==========================================
+# 2. 修改后的评估模块 (只保留对比图和残差图)
+# ==========================================
+
+def calculate_metrics_simple(original, denoised):
+    """只计算基础指标用于显示"""
+    residual = original - denoised
+    valid_mask = ~np.isnan(residual)
+    res_clean = residual[valid_mask]
+    
+    if len(res_clean) == 0:
+        return residual, 0, 0
+        
+    rmse = np.sqrt(np.mean(res_clean**2))
+    std_res = np.std(res_clean)
+    
+    return residual, rmse, std_res
+
+def evaluate_denoising(original, denoised, band_name, save_dir):
+    """
+    精简版评估：原始图 vs 去噪图 vs 残差图
+    """
+    save_dir = Path(save_dir)
+    
+    # --- 计算基础残差信息 ---
+    residual, rmse, std_res = calculate_metrics_simple(original, denoised)
+    print(f"[{band_name}] RMSE: {rmse:.5f}, Residual Std: {std_res:.5f}")
+
+    # --- 计算原始图和去噪图的均值和标准差 ---
+    orig_mean = np.nanmean(original)
+    orig_std = np.nanstd(original)
+    denoised_mean = np.nanmean(denoised)
+    denoised_std = np.nanstd(denoised)
+    
+    print(f"    Original  -> Mean: {orig_mean:.5f}, Std: {orig_std:.5f}")
+    print(f"    Denoised  -> Mean: {denoised_mean:.5f}, Std: {denoised_std:.5f}")
+
+    # --- 绘图配置 ---
+    # 统一色阶范围，确保对比公平 (使用 2%-98% 拉伸)
+    vmin = np.nanpercentile(original, 2)
+    vmax = np.nanpercentile(original, 98)
+    
+    # 设置画布：1行3列
+    fig = plt.figure(figsize=(20, 6))
+    plt.suptitle(f"Denoising Result: {band_name} (RMSE: {rmse:.4f})", fontsize=16)
+
+    # === 子图 1: 原始带噪图 ===
+    ax1 = plt.subplot(1, 3, 1)
+    im1 = ax1.imshow(original, cmap='viridis', vmin=vmin, vmax=vmax)
+    ax1.set_title(f"1. Original (Noisy)")
+    # ax1.set_title(f"1. Original (Noisy)\nMean: {orig_mean:.5f}, Std: {orig_std:.5f}")
+    plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+    ax1.axis('off')
+
+    # === 子图 2: 去噪后结果 ===
+    ax2 = plt.subplot(1, 3, 2)
+    im2 = ax2.imshow(denoised, cmap='viridis', vmin=vmin, vmax=vmax)
+    ax2.set_title("2. Denoised (Clean)")
+    # ax2.set_title(f"2. Denoised (Clean)\nMean: {denoised_mean:.5f}, Std: {denoised_std:.5f}")
+    plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04) 
+    ax2.axis('off')
+
+    # === 子图 3: 残差空间分布 ===
+    # 残差图使用 Coolwarm 色带，红正蓝负，0在中间
+    ax3 = plt.subplot(1, 3, 3)
+    res_limit = std_res * 3  # 限制显示范围以便看清噪点
+    im3 = ax3.imshow(residual, cmap='coolwarm', vmin=-res_limit, vmax=res_limit)
+    ax3.set_title("3. Residual Map (Removed Noise)")
+    plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
+    ax3.axis('off')
+
+    plt.tight_layout()
+    out_path = save_dir / f"{band_name}_compare.png"
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+    print(f"    -> Saved comparison to {out_path}")
+
+# ==========================================
+# 3. 主程序
+# ==========================================
+
+def process_nc_file(file_path, output_dir, h_factor=1.8, plot=False, verbose=True):
+    """
+    处理单个NC文件进行去噪
     
     参数:
-        band_data: xarray DataArray 或 numpy array (包含 NaN)
-        h_val: 去噪强度，越大越平滑，但也越容易丢失细节。
-               对于估计模糊核，建议设为 10 左右。
+        file_path: 输入NC文件路径
+        output_dir: 输出目录
+        h_factor: 去噪强度因子 (推荐 1.0 - 2.5)
+        plot: 是否生成对比图
+        verbose: 是否显示详细信息
+    
+    返回:
+        (success, output_path, error_msg)
     """
-    # 1. 转为 numpy 数组
-    img = band_data.values if hasattr(band_data, 'values') else band_data
+    import shutil
     
-    # 2. 处理 NaN 值 (OpenCV 无法处理 NaN)
-    # 创建一个掩膜，标记哪里是有效值
-    valid_mask = ~np.isnan(img)
-    # 将 NaN 替换为 0 (或者该波段的最小值/均值，防止去噪边缘出错)
-    img_filled = np.nan_to_num(img, nan=0.0)
-    
-    # 3. 数据类型转换 (关键步骤)
-    # GOCI 的 L_TOA 是浮点数。为了获得最佳去噪效果，建议先归一化到 0-255
-    min_val = np.min(img_filled[valid_mask]) # 只算有效区域的最小值
-    max_val = np.max(img_filled[valid_mask])
-    
-    # 线性拉伸到 0-255 (Uint8)
-    if max_val - min_val == 0:
-        return img_filled # 防止除以0
+    try:
+        file_path = Path(file_path)
+        output_dir = Path(output_dir)
         
-    img_uint8 = ((img_filled - min_val) / (max_val - min_val) * 255).astype(np.uint8)
-    
-    # 4. 应用非局部均值去噪 (Non-local Means Denoising)
-    # 这是针对单一图像最经典的去噪算法，非常适合去除高斯噪声
-    img_denoised = cv2.fastNlMeansDenoising(img_uint8, None, h=h_val, templateWindowSize=7, searchWindowSize=21)
-    
-    # 5. (可选) 如果需要，可以把数据再转回原来的浮点范围
-    # img_result = img_denoised.astype(np.float32) / 255.0 * (max_val - min_val) + min_val
-    
-    # 这里我们直接返回去噪后的 uint8 图像，因为 KernelGAN 等网络通常也喜欢吃 0-255 的图
-    return img_denoised
+        if verbose:
+            print(f"Loading: {file_path}")
+        
+        # 读取数据
+        band_names_list = ['L_TOA_443', 'L_TOA_490', 'L_TOA_555', 'L_TOA_660', 'L_TOA_865']
+        arr, band_names = read_nc(str(file_path), 'geophysical_data', band_names_list)
+        
+        bands, height, width = arr.shape
+        
+        # 创建输出目录
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 生成输出文件名（在原文件名基础上加_denoised）
+        input_filename = file_path.stem  # 获取文件名（不含扩展名）
+        output_filename = f"{input_filename}_denoised.nc"
+        output_path = output_dir / output_filename
+        
+        # 如果需要画图，创建绘图目录
+        if plot:
+            plot_dir = output_dir / "plots"
+            plot_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 存储去噪后的数据
+        denoised_data_list = []
+        sigma_values = {}  # 记录每个波段的sigma值
+        
+        for i in range(bands):
+            band_name = band_names[i]
+            if verbose:
+                print(f"\n--- Processing {band_name} ---")
+            
+            current_band = arr[i].values
+            
+            # 1. 去噪 (h_factor 可根据需要调整，推荐 1.0 - 2.5)
+            denoised_img, sigma = denoise_band_float_nlm(current_band, h_factor=h_factor, patch_size=7, patch_distance=11, verbose=verbose)
+            sigma_values[band_name] = sigma  # 保存sigma值
+            
+            # 2. 将去噪后的数据转换为xarray DataArray
+            denoised_da = xr.DataArray(
+                denoised_img,
+                dims=arr[i].dims,
+                coords=arr[i].coords,
+                attrs=arr[i].attrs,
+                name=band_name
+            )
+            denoised_data_list.append(denoised_da)
+            
+            # 3. 如果需要，绘图 (原始 vs 去噪 vs 残差)
+            if plot:
+                evaluate_denoising(current_band, denoised_img, band_name, plot_dir)
+        
+        # 保存所有波段到一个nc文件
+        if verbose:
+            print(f"\n--- Saving denoised data to {output_path} ---")
+        
+        # 先复制原始nc文件结构
+        shutil.copy2(str(file_path), str(output_path))
+        if verbose:
+            print(f"  -> Copied original file structure")
+        
+        # 在新文件中添加 denoised 组
+        denoised_dataset = xr.Dataset({da.name: da for da in denoised_data_list})
+        
+        # 添加全局属性：噪声sigma和去噪强度h
+        denoised_dataset.attrs['h_factor'] = h_factor
+        denoised_dataset.attrs['denoising_method'] = 'Non-Local Means (NLM)'
+        denoised_dataset.attrs['patch_size'] = 7
+        denoised_dataset.attrs['patch_distance'] = 11
+        
+        # 添加每个波段的sigma值
+        for band_name, sigma in sigma_values.items():
+            h_val = h_factor * sigma
+            denoised_dataset.attrs[f'{band_name}_sigma'] = sigma
+            denoised_dataset.attrs[f'{band_name}_h'] = h_val
+        
+        # 添加平均sigma和h值
+        avg_sigma = np.mean(list(sigma_values.values()))
+        avg_h = h_factor * avg_sigma
+        denoised_dataset.attrs['average_sigma'] = avg_sigma
+        denoised_dataset.attrs['average_h'] = avg_h
+        
+        denoised_dataset.to_netcdf(str(output_path), mode='a', group='denoised')
+        if verbose:
+            print(f"✓ Denoised data saved successfully in 'denoised' group!")
+            print(f"  -> Average Sigma: {avg_sigma:.6f}, Average h: {avg_h:.6f}")
+        
+        return True, output_path, None
+        
+    except Exception as e:
+        error_msg = f"Error: {str(e)}"
+        if verbose:
+            print(f"✗ {error_msg}")
+        return False, None, error_msg
+
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Read a .npy file and print basic info")
-    # 注意：这里你写的是 .npy file，但代码逻辑是 read_nc，如果是 nc 文件请确保路径正确
-    parser.add_argument("file_path", type=str, help="Path to .nc file") 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("file_path", type=str, help="Path to .nc file")
+    parser.add_argument("--output", type=str, default="H:\\GOCI-2\\patch_output_nc\\patches_denoised", 
+                        help="Output directory for denoised .nc files (default: H:\\GOCI-2\\patch_output_nc\\patches_denoised)")
+    parser.add_argument("--h_factor", type=float, default=1.8,
+                        help="Denoising strength factor (default: 1.8, recommended: 1.0-2.5)")
+    parser.add_argument("--plot", action="store_true", 
+                        help="Generate comparison plots (default: False)")
     args = parser.parse_args()
 
-    path = args.file_path
-    print(f"Loading: {path}")
+    # 调用处理函数
+    success, output_path, error = process_nc_file(
+        file_path=args.file_path,
+        output_dir=args.output,
+        h_factor=args.h_factor,
+        plot=args.plot,
+        verbose=True
+    )
     
-    # 1. 读取数据
-    arr = read_nc(path, 'geophysical_data')
-    
-    # 打印基础信息
-    bands, height, width = arr.shape
-    print(f"Bands: {bands}, Height: {height}, Width: {width}")
-    
-    # 2. 提取第一波段
-    first_band = arr[0] # 这是 L_TOA_443
-    print(f"Processing First Band: {first_band.shape}")
-
-    # 3. 执行去噪 (核心修改)
-    # 这里的 h=10 是去噪强度，你可以根据上一轮我们算出的 sigma 来调整
-    # 如果 sigma 很大，h 就要设大一点
-    denoised_img = denoise_band(first_band, h_val=10)
-
-    # 4. 可视化对比
-    plt.figure(figsize=(12, 6))
-    
-    # 原图 (含 NaN, 用 xarray 的 plot 方便自动处理 NaN)
-    plt.subplot(1, 2, 1)
-    # 为了显示正常，我们只画有效值部分，由于 first_band 是 xarray对象，直接用 imshow 需要处理
-    plt.imshow(first_band, cmap='viridis') 
-    plt.title("Original (Raw GOCI-2)")
-    plt.colorbar()
-    
-    # 去噪图
-    plt.subplot(1, 2, 2)
-    plt.imshow(denoised_img, cmap='viridis')
-    plt.title("Denoised (NLM, h=10)")
-    plt.colorbar()
-    
-    plt.tight_layout()
-    
-    # 创建保存目录
-    save_path = Path("denoise/denoise_result")
-    save_path.mkdir(exist_ok=True)
-    
-    plt.savefig(save_path / "denoise_comparison.png", dpi=300)
-    print(f"Result saved to {save_path / 'denoise_comparison.png'}")
-    
-    # 5. 保存去噪后的数据供后续使用 (例如给 KernelGAN)
-    # np.save(save_path / "clean_img_for_kernel.npy", denoised_img)
+    if not success:
+        print(f"\nProcessing failed: {error}")
+        exit(1)
 
 if __name__ == "__main__":
     main()
