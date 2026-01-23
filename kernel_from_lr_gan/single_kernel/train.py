@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import netCDF4 as nc
 from tqdm import tqdm
+from torch.nn.utils import clip_grad_norm_
 
 # 保证本文件夹内模块可导入，无论从何处执行脚本
 CURRENT_DIR = os.path.dirname(__file__)
@@ -133,8 +134,10 @@ def main():
     hr_patch_size = 256          # 高分辨率patch尺寸
     lr_crop_size = 32            # 从HR中裁剪的低分辨率尺寸
     batch_size = 16
-    lr_rate = 1e-4
-    outdir = r'output\kernelgan_out_denoised_single_kernel'
+    lr_rate = 2e-4
+    reg_weight = 0.005            # Loss_Reg 权重
+    grad_clip_norm = 20.0         # 全局梯度裁剪阈值
+    outdir = r'output\kernelgan_out_denoised_single_kernel_stable'
     log_every = 100              # 普通训练日志间隔
     kernel_log_every = 100       # 核详细统计输出间隔
     save_intermediate = True     # 是否保存中间核
@@ -151,7 +154,7 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     log_file = os.path.join(outdir, 'training_log.txt')
     with open(log_file, 'w', encoding='utf-8') as f:
-        f.write('Iteration,Loss_D,Loss_G_adv,Loss_Reg\n')
+        f.write('Iteration,Loss_D,Loss_G_adv,Loss_Reg,Loss_Reg_weighted\n')
     print(f'✓ 训练日志将保存到: {log_file}\n')
 
     # 模型（生成器输入 5 通道，输出 5 通道；判别器接受 5 通道）
@@ -272,7 +275,9 @@ def main():
         pred_real = D(real_ds)
         pred_fake = D(fake_ds.detach())
         loss_D = lsgan_d_loss(pred_real, pred_fake)
-        opt_D.zero_grad(); loss_D.backward(); opt_D.step()
+        opt_D.zero_grad(); loss_D.backward()
+        grad_norm_D = clip_grad_norm_(parameters=D.parameters(), max_norm=grad_clip_norm)
+        opt_D.step()
 
         # 训练G（对抗 + 核正则）
         pred_fake = D(fake_ds)
@@ -290,19 +295,24 @@ def main():
                 epsilon=3.0   # CenterMax - 强制中心点最大
             ))
         loss_reg = torch.mean(input=torch.stack(tensors=reg_list))
+        loss_reg_weighted = reg_weight * loss_reg
         k = ks_band.mean(dim=0)  # 用于后续单核统计（合并核）
-        loss_G = loss_G_adv + loss_reg
-        opt_G.zero_grad(); loss_G.backward(); opt_G.step()
+        loss_G = loss_G_adv + loss_reg_weighted
+        opt_G.zero_grad(); loss_G.backward()
+        grad_norm_G = clip_grad_norm_(parameters=G.parameters(), max_norm=grad_clip_norm)
+        opt_G.step()
         
         # 保存损失值到文件
         with open(log_file, 'a', encoding='utf-8') as f:
-            f.write(f'{t+1},{loss_D.item():.6f},{loss_G_adv.item():.6f},{loss_reg.item():.6f}\n')
+            f.write(f'{t+1},{loss_D.item():.6f},{loss_G_adv.item():.6f},{loss_reg.item():.6f},{loss_reg_weighted.item():.6f}\n')
 
         # 更新进度条显示
         pbar.set_postfix({
             'D': f'{loss_D.item():.4f}',
             'G_adv': f'{loss_G_adv.item():.4f}',
-            'Reg': f'{loss_reg.item():.4f}'
+            'RegW': f'{loss_reg_weighted.item():.4f}',
+            'gN_D': f'{float(grad_norm_D):.2f}',
+            'gN_G': f'{float(grad_norm_G):.2f}'
         })
         
         # 详细日志
@@ -310,7 +320,10 @@ def main():
             extra = ''
             if verbose:
                 extra = generator_weight_stats(G)
-            tqdm.write(f"[LOG] Iter {t+1}/{iters} | D: {loss_D.item():.4f} | G_adv: {loss_G_adv.item():.4f} | Reg: {loss_reg.item():.4f} {extra}")
+            tqdm.write(
+                f"[LOG] Iter {t+1}/{iters} | D: {loss_D.item():.4f} | G_adv: {loss_G_adv.item():.4f} | Reg: {loss_reg.item():.4f} "
+                f"| gN_D: {float(grad_norm_D):.2f} | gN_G: {float(grad_norm_G):.2f} {extra}"
+            )
 
         if (t + 1) % kernel_log_every == 0:
             km = kernel_metrics(k)

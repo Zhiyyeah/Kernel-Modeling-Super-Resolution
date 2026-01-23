@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils import spectral_norm
+import matplotlib.pyplot as plt
 
 
 class MultiBandLinearGenerator(nn.Module):
@@ -18,9 +19,11 @@ class MultiBandLinearGenerator(nn.Module):
         in_ch (int): 输入通道数，即波段数量。默认 5（对应 5 个光谱波段）。
         mid_ch (int): 每条卷积链的中间层通道数。默认 32。
     """
-    def __init__(self, in_ch: int = 5, mid_ch: int = 32):
+    def __init__(self, in_ch: int = 5, mid_ch: int = 32, gaussian_sigma: float = 2.0):
         super().__init__()
         self.in_ch = in_ch
+        self.mid_ch = mid_ch
+        self.gaussian_sigma = gaussian_sigma
         ks = [7, 5, 3, 1, 1, 1]
         chains = []
         for _ in range(in_ch):
@@ -38,6 +41,44 @@ class MultiBandLinearGenerator(nn.Module):
         self.down1 = nn.AvgPool2d(kernel_size=2, stride=2)
         self.down2 = nn.AvgPool2d(kernel_size=2, stride=2)
         self.down3 = nn.AvgPool2d(kernel_size=2, stride=2)
+
+        # 初始化为和为 1 的二维高斯模糊核
+        self._init_gaussian_kernels()
+
+    def _build_gaussian_kernel(self, size: int, sigma: float, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        coords = torch.arange(start=0, end=size, device=device, dtype=dtype) - (size - 1) * 0.5
+        yy, xx = torch.meshgrid(coords, coords, indexing='ij')
+        g = torch.exp(- (xx ** 2 + yy ** 2) / (2 * sigma ** 2))
+        g = g / g.sum()
+        return g
+
+    @torch.no_grad()
+    def _init_gaussian_kernels(self) -> None:
+        """将每条卷积链初始化为等效二维高斯核（和为 1）。"""
+        for convs in self.chains:
+            # 第一层：所有输出通道共享同一高斯核
+            first = convs[0]
+            g = self._build_gaussian_kernel(
+                size=first.kernel_size[0],
+                sigma=self.gaussian_sigma,
+                device=first.weight.device,
+                dtype=first.weight.dtype,
+            )
+            first.weight.zero_()
+            first.weight.copy_(g.expand(self.mid_ch, 1, g.shape[0], g.shape[1]))
+
+            # 中间层：设置为按通道的单位映射（中心为 1，其余为 0）
+            for conv in convs[1:-1]:
+                conv.weight.zero_()
+                _, _, kH, kW = conv.weight.shape
+                center_h, center_w = kH // 2, kW // 2
+                for i in range(min(conv.out_channels, conv.in_channels)):
+                    conv.weight[i, i, center_h, center_w] = 1.0
+
+            # 最后一层：将 mid_ch 通道做平均，保持整体核形状与和为 1
+            last = convs[-1]
+            last.weight.zero_()
+            last.weight.fill_(1.0 / self.mid_ch)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -177,3 +218,22 @@ if __name__ == "__main__":
     ks = G.extract_effective_kernels()  # [5,kH,kW]
     km = G.extract_merged_kernel()      # [kH,kW]
     print(f"G out: {tuple(y.shape)} | D out: {tuple(s.shape)} | kernels: {tuple(ks.shape)} merged: {tuple(km.shape)} sum(merged)={km.sum().item():.4f}")
+
+    # 可视化初始核
+    ks_cpu = ks.cpu().numpy()
+    km_cpu = km.cpu().numpy()
+    fig, axes = plt.subplots(1, 6, figsize=(12, 2.5))
+    for i in range(5):
+        ax = axes[i]
+        im = ax.imshow(ks_cpu[i], cmap='viridis')
+        ax.set_title(f'Band {i}')
+        ax.axis('off')
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    ax = axes[5]
+    im = ax.imshow(km_cpu, cmap='viridis')
+    ax.set_title('Merged')
+    ax.axis('off')
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    plt.savefig('initial_kernels.png', dpi=150)
+    print("Saved initial kernels to initial_kernels.png")
