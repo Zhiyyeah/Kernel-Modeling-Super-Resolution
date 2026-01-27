@@ -58,7 +58,7 @@ def visualize_kernel_file(kernel_path: str, save_path: str) -> None:
 
 
 def main():
-    kernel_dir = os.path.join('output', 'kernelgan_out_denoised_single_kernel_stable')
+    kernel_dir = os.path.join('output', 'kernelgan_out_denoised_single_kernel_stable_10000iters')
     vis_dir = os.path.join(kernel_dir, 'vis_all')
     os.makedirs(vis_dir, exist_ok=True)
 

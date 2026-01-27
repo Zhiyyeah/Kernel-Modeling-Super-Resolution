@@ -130,14 +130,14 @@ def main():
     patch_files = load_patches_from_folder(patch_dir)
     
     # 训练配置
-    iters = 3000
+    iters = 10000
     hr_patch_size = 256          # 高分辨率patch尺寸
     lr_crop_size = 32            # 从HR中裁剪的低分辨率尺寸
     batch_size = 16
-    lr_rate = 2e-4
-    reg_weight = 0.005            # Loss_Reg 权重
+    lr_rate = 4e-4
+    reg_weight = 0.002            # Loss_Reg 权重
     grad_clip_norm = 20.0         # 全局梯度裁剪阈值
-    outdir = r'output\kernelgan_out_denoised_single_kernel_stable'
+    outdir = r'output\kernelgan_out_denoised_single_kernel_stable_10000iters'
     log_every = 100              # 普通训练日志间隔
     kernel_log_every = 100       # 核详细统计输出间隔
     save_intermediate = True     # 是否保存中间核
